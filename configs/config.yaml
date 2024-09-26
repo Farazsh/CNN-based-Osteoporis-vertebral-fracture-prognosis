@@ -1,0 +1,20 @@
+---
+model:
+  type: ResNet50
+  learning_rate: 0.0001
+  criterion: CCE
+  optimizer: AdamW
+  weight_decay: 1e-2
+  classification_threshhold : 0.5
+network_architecture:
+  num_hidden_units: 512
+dataset:
+  dataset: verse
+  label: genant
+  batch_size: 128
+logging:
+  experiment_name: Spacing 111 Baseline
+  wandb_project: Spacing Difference
+...
+
+

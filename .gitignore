@@ -1,0 +1,9 @@
+﻿### project specific
+jupyter notebooks/
+
+### general
+__pycache__/
+.uuid
+
+# Editor
+.idea/
