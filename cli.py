@@ -1,118 +1,73 @@
-import multiprocessing
+"""Command line interface for osteo fracture project."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 import click
 
-import torch
-
-from math import floor
-from src.data_processing.convert_dicom_to_nii import start_conversion
-from src.evaluate_checkpoint import start_checkpoint_evaluation
-from src.hyperparameter_search import start_hp_search
-from src.train import start_training
-from src.lin_eval_and_fine_tune import start_lin_eval_fine_tune
-from configs import config as c
+from osteo_fracture.experiments.cross_validation import run_cross_validation
+from osteo_fracture.experiments.hyperparameter_search import run_hyperparameter_search
+from scripts.preprocess_dicom import main as preprocess_dicom
+from train import run_training
 
 
 @click.group()
-def cli():
-    pass
+def cli() -> None:
+    """Top-level command group."""
 
 
-@cli.command()
-@click.option("--num_gpus",
-              required=False,
-              default=torch.cuda.device_count(),
-              help="The number of GPUs used for training one model.")
-@click.option("--num_cpus",
-              required=False,
-              default=multiprocessing.cpu_count(),
-              help="The number of CPU cores for training one model."
-                   "Each gpu will have floor(num_cpus/num_gpus) number of cpus")
-def train(num_gpus: int, num_cpus: int):
-    """Initializes and starts the training."""
-    num_cpus = floor(num_cpus/num_gpus)
-    main_config = c.Config(num_cpus)
-    for i in range(main_config.model.number_of_experiments):
-        main_config.model.experiment_name = main_config.model.experiment_name[:-1]  + str(i)
-        start_training(num_gpus, main_config)
+@cli.command("train")
+@click.option("--config", "config_path", default="configs/default.yaml", show_default=True)
+def train_cmd(config_path: str) -> None:
+    """Train and test a model from a YAML config."""
+    run_training(config_path)
 
 
-
-@cli.command()
-@click.option("--num_gpus",
-              required=False,
-              default=torch.cuda.device_count(),
-              help="The number of GPUs used by the HP search.")
-@click.option("--gpus_per_trial",
-              required=False,
-              default=1,
-              help="The number of GPUs each trial will have. "
-                   "Can be smaller than 1 to allow concurrent trials on a single gpu.")
-@click.option("--num_cpus",
-              required=False,
-              default=multiprocessing.cpu_count(),
-              help="The number of CPU cores used by the HP search.")
-def hp_search(num_gpus: int, gpus_per_trial:float, num_cpus: int,):
-    """Initializes and starts a hyperparameter search."""
-    start_hp_search(num_gpus, gpus_per_trial, num_cpus)
+@cli.command("evaluate")
+@click.option("--config", "config_path", default="configs/default.yaml", show_default=True)
+def evaluate_cmd(config_path: str) -> None:
+    """Evaluate by running trainer test with configured checkpoint strategy."""
+    run_training(config_path)
 
 
-@cli.command()
-@click.option("--name",
-              required=False,
-              help="The name of the .ckpt file inside the checkpoints/ directory.")
-@click.option("--dataset",
-              required=False,
-              default='db_ve',
-              help="The dataset to evaluate the model on. Currently 'verse' and 'db' are supported")
-@click.option("--validate",
-              required=False,
-              default=True,
-              help="Whether to evaluate on the validation dataset.")
-@click.option("--test",
-              required=False,
-              default=False,
-              help="Whether to evaluate on the test dataset.")
-def evaluate(name: str, dataset: str, validate: bool, test: bool):
-    """Loads a checkpoint and evaluates it with testing."""
-    start_checkpoint_evaluation(name, dataset, validate, test)
+@cli.command("predict")
+@click.option("--config", "config_path", default="configs/default.yaml", show_default=True)
+def predict_cmd(config_path: str) -> None:
+    """Alias for inference/evaluation pipeline."""
+    run_training(config_path)
 
 
-@cli.command()
-@click.option("--name",
-              required=False,
-              help="The name of the experiment folder.")
-@click.option("--linear_eval",
-              required=False,
-              default=False,
-              help="Whether to do linear evaluation of the provided model")
-@click.option("--fine_tune",
-              required=False,
-              default=True,
-              help="Whether to fine tune the provided model")
-def fine_tune(name: str, linear_eval: bool, fine_tune: bool):
-    """Loads a checkpoint and evaluates it with testing."""
-    start_lin_eval_fine_tune(name, linear_eval, fine_tune)
+@cli.command("preprocess")
+@click.option("--dicom-root", required=True)
+@click.option("--output-root", required=True)
+def preprocess_cmd(dicom_root: str, output_root: str) -> None:
+    """Convert DICOM to NIfTI and generate vertebral patches."""
+    preprocess_dicom(dicom_root, output_root)
 
 
-
-@cli.command()
-@click.option("--root_dir",
-              required=True,
-              help="The root dir that contains further dirs with the dicom data")
-@click.option("--output_dir",
-              required=True,
-              help="The output dir, where the nii.gz files will be saved")
-@click.option("--progress",
-              required=False,
-              default=True,
-              help="Show conversion progress")
-def convert_dicom_to_nii(root_dir: str, output_dir: str, progress: bool):
-    """Converts all dicom files inside the root directory to nii files """
-    start_conversion(root_dir, output_dir, progress)
+@cli.command("crossval")
+@click.option("--config", "config_path", default="configs/default.yaml", show_default=True)
+@click.option("--splits", multiple=True, default=["Split1", "Split2", "Split3", "Split4"])
+def crossval_cmd(config_path: str, splits: tuple[str, ...]) -> None:
+    """Run cross-validation over provided split columns."""
+    run_cross_validation(config_path, list(splits))
 
 
+@cli.command("hp-search")
+@click.option("--config", "config_path", default="configs/default.yaml", show_default=True)
+@click.option("--lr", "learning_rates", multiple=True, type=float, default=[1e-3, 1e-4])
+@click.option("--model", "model_names", multiple=True, default=["fnet", "resnet18"])
+def hp_search_cmd(config_path: str, learning_rates: tuple[float, ...], model_names: tuple[str, ...]) -> None:
+    """Run simple grid hyperparameter search."""
+    run_hyperparameter_search(config_path, list(learning_rates), list(model_names))
 
-if __name__ == '__main__':
-    # Entrypoint for the training
-    torch.set_printoptions(precision=None, threshold=None, edgeitems=None, linewidth=None, profile=None, sci_mode=False)
+
+if __name__ == "__main__":
     cli()

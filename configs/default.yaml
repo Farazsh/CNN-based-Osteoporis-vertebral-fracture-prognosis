@@ -1,0 +1,40 @@
+seed: 42
+
+data:
+  img_dir: MrOs_dataset/patches_arbitary_sized
+  labels_file: MrOs_dataset/MrOs_Label_from_meta_v12_1_relabelled2_newsplit.csv
+  batch_size: 16
+  num_workers: 4
+  label: IF10SQ1
+  censor_label: Censored_label
+  id_label: ID
+  input_size: 47
+  input_dimension: 3
+  split_name: Split1
+  inference_only: false
+  image_augmentation_prob: 0.33
+  augmentation_magnitude: 8
+  num_sequential_transforms: 3
+
+model:
+  name: fnet
+  learning_rate: 0.0001
+  optimizer: adamw
+  pos_weight: null
+  threshold: 0.5
+
+trainer:
+  max_epochs: 50
+  devices: 1
+  accelerator: auto
+  precision: "32"
+  monitor_metric: validation_auroc
+  monitor_mode: max
+  early_stopping_patience: 8
+  use_swa: false
+  swa_lrs: 0.001
+
+logging:
+  project: osteoporotic-fracture-prognosis
+  run_name: baseline
+  use_wandb: true
