@@ -6,7 +6,7 @@ from pathlib import Path
 # from src.nets.archs.resnet import ResNet50
 # from src.nets.archs.senet import SerResNext50, SeResNet50, SerResNext101, SeResNet101, SeResNet152
 
-WANDB_KEY = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+WANDB_KEY = "xxxxxxxxxxxxx"
 WANDB_PROJECT_NAME = "Vertebral_Fracture_Diagnostics_VerSe"
 
 class DataModuleConfig:

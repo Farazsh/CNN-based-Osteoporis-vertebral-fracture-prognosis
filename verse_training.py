@@ -649,7 +649,7 @@ def start_training(model_name, network, max_epoch, lr, pretrained):
                              EarlyStopping(monitor=monitoring_metric, min_delta = 0.005, patience=20, verbose=False, mode=monitoring_mode)
                              ]
                          )
-    trainer.fit(model=model, datamodule=dataset_loader)
+    # trainer.fit(model=model, datamodule=dataset_loader)
 
     # For explicitly saving the checkpoint at the end of full-training
     # trainer.save_checkpoint(join(checkpoint_folder,group_name+'_'+split_name+f'Model_trained_for_epochs_{epochs}.ckpt'))
@@ -662,7 +662,7 @@ def start_training(model_name, network, max_epoch, lr, pretrained):
         epoch_number = 0
 
     model = PLmodel.load_from_checkpoint(best_model_path, class_ratio=class_ratio, spatial_dims=spatial_dims,
-                                         network=net_architecture, learning_rate=learning_rate, threshold=0.5, label_name=label,
+                                         network=net_architecture, learning_rate=learning_rate, threshold=0.5, label_name=binary_label,
                                          fold=binary_label, save_folder=checkpoint_folder, split=binary_label, epoch=epoch_number,
                                          metrics_file=config_file.metrics_file)
     trainer.test(model=model, datamodule=dataset_loader)
@@ -761,7 +761,7 @@ def inspect_data_loader(image_folder, labels_file, split_name, label_name):
 
 def main_prog(seed):
     set_seed(seed)
-    epoch = 50
+    epoch = 30
     pretrained = True
     for lr in [1e-3]:  #to test for different Learning rates
         for net in ["seresnetbyol100"]:  #to test different models
@@ -771,8 +771,8 @@ def main_prog(seed):
 
 
 if __name__ == "__main__":
-    test_network()
-    # main_prog(478546)
+    # test_network()
+    main_prog(898562)
     # image_folder = r"verse19/full_dataset_patches"
     # labels_file = r"verse19/verse19_0vs23_splitted.csv"
     # split_name = 'Dataset'
