@@ -1,5 +1,11 @@
 ﻿### project specific
 jupyter notebooks/
+jl_ckpts/
+ca_ckpts/
+verse19/
+checkpoints/
+wandb/
+
 
 ### general
 __pycache__/

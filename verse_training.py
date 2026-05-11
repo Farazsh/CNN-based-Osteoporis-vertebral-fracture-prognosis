@@ -3,8 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torchvision.models
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from configs.config import Config
-from src.datasets.dataloaders import DataModule
+from configs.config import DataModuleConfig, WANDB_KEY, WANDB_PROJECT_NAME
+from src.datasets.dataloader import DataModule
 import warnings
 import pytorch_lightning as pl
 import torch.nn as nn
@@ -39,13 +39,17 @@ from src.nets.archs.resnet50_3d import resnet50_3d
 from src.nets.archs.resnet50_2d import resnet50_2d
 from src.nets.archs.resnet2d import Resnet18_2d
 from src.nets.archs.resnet3d import Resnet18_3d
+from src.nets.archs.resnet_family import generate_model
+
 torch.set_float32_matmul_precision('medium')
 warnings.filterwarnings("ignore")
 plt.rcParams['figure.figsize'] = [6, 6]
 plt.rcParams['figure.dpi'] = 200
 optimizers = {"adam": Adam, "sgd": SGD, "adamw": AdamW}
 
-
+from torchvision.models import resnet50 as torch_resnet_50, ResNet50_Weights
+from torchvision.models import resnet18 as torch_resnet_18, ResNet18_Weights
+from src.nets.archs.senet import CustomSEResNet50
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -56,7 +60,7 @@ def set_seed(seed):
 class BaseModel(pl.LightningModule):
     def __init__(self, class_ratio, spatial_dims, learning_rate, network, optimizer_name, threshold, threshold_tuning,
                  save_folder, inference_only, df, split, fold, label_name, fracture_timeline, label_suffix,
-                 evaluate_ckpt, epoch):
+                 evaluate_ckpt, metrics_file, epoch):
         super().__init__()
 
 
@@ -86,6 +90,7 @@ class BaseModel(pl.LightningModule):
         self.epoch_no = epoch
         self.total_steps = 0
         self.save_folder = save_folder
+        self.metrics_file = metrics_file
 
         # Inference only
         self.inference_only = inference_only
@@ -96,11 +101,12 @@ class BaseModel(pl.LightningModule):
 
         # For recording model outputs for each datapoint
         if inference_only and df is not None:
-            self.model_outputs = ['predictions', 'actuals', 'id']
+            self.model_outputs = ['predictions', 'actuals', 'logits', 'id']
             self.df = df
             self.split = split
             self.fold = fold
-            self.df = self.df[self.df[f"Split{self.split}"]=='Testing']
+            # self.df = self.df[self.df[f"Split{self.split}"]=='Testing']  # MrOS
+            self.df = self.df[self.df[f"Dataset"] == 'Testing']
             self.df['ID'] = self.df['ID'].astype(int)
 
         for op in self.model_outputs:
@@ -113,41 +119,132 @@ class BaseModel(pl.LightningModule):
                 self.backbone = Fnet3D()
             elif self.network.lower() == 'seresnext50':
                 self.backbone = monai.networks.nets.SEResNext50(spatial_dims=3, in_channels=1, num_classes=1)
+            elif self.network.lower() == "resnet18new":
+                self.backbone = generate_model(model_depth=18, n_input_channels=1, n_classes=1)
+            elif self.network.lower() == "resnet18newpt":
+                self.backbone = generate_model(model_depth=18, n_input_channels=1, n_classes=1)
+                pretrain_path = r"medical_net/MedicalNet_pytorch_files2/pretrain/resnet_18_23dataset.pth"
+                print('loading pretrained model {}'.format(pretrain_path))
+                pretrain = torch.load(pretrain_path)
+                net_dict = self.backbone.state_dict()
+                pretrain_dict = {}
+                for k, v in pretrain['state_dict'].items():
+                    if k[7:] in net_dict:
+                        pretrain_dict[k[7:]] = v
+                    else:
+                        print(f"Not found {k}")
+                net_dict.update(pretrain_dict)
+                self.backbone.load_state_dict(net_dict, strict=True)
+                print("Pretrained weigths succesfully loaded")
+            elif self.network.lower() == "resnet50new":
+                self.backbone = generate_model(model_depth=50, n_input_channels=1, n_classes=1)
+            elif self.network.lower() == "resnet50newpt":
+                self.backbone = generate_model(model_depth=50, n_input_channels=1, n_classes=1)
+                pretrain_path = r"medical_net/MedicalNet_pytorch_files2/pretrain/resnet_50_23dataset.pth"
+                print('loading pretrained model {}'.format(pretrain_path))
+                pretrain = torch.load(pretrain_path)
+                net_dict = self.backbone.state_dict()
+                pretrain_dict = {}
+                for k, v in pretrain['state_dict'].items():
+                    if k[7:] in net_dict:
+                        pretrain_dict[k[7:]] = v
+                    else:
+                        print(f"Not found {k}")
+                net_dict.update(pretrain_dict)
+                self.backbone.load_state_dict(net_dict, strict=True)
+                print("Pretrained weigths succesfully loaded")
             elif self.network.lower() == 'resnet18':
                 self.backbone = Resnet18_3d()
             elif self.network.lower() == 'resnet50':
                 self.backbone = resnet50_3d()
             elif self.network.lower() == 'densenet201':
                 self.backbone = monai.networks.nets.DenseNet201(spatial_dims=3, in_channels=1, out_channels=1)
+            elif self.network.lower() == 'seresnetsll':
+                self.backbone = monai.networks.nets.SEResNet50(input_3x3=False, in_channels=1, spatial_dims=3,
+                                                               dropout_prob=0.5, num_classes=1)
+                pretrained_state_dict = torch.load(r"jl_ckpts/0_rtn_ckpt_epoch=255_step=256.00.ckpt")['state_dict']
+                pretrained_state_dict_corrected = {key.split('.', 1)[1]: value for key, value in
+                                                   pretrained_state_dict.items()}
+                self.backbone.load_state_dict(pretrained_state_dict_corrected, strict=False)
+            elif self.network.lower() == 'seresnetbyol100':
+                self.backbone = CustomSEResNet50()
+                self._load_backbone_from_ckpt(
+                    ckpt_path=r"ca_ckpts/0_rtn_ckpt_epoch=99_step=98.00_v2.ckpt",
+                    strict=False,
+                )
+            elif self.network.lower() == 'seresnet50':
+                self.backbone = monai.networks.nets.SEResNet50(input_3x3=False, in_channels=1, spatial_dims=3,
+                                                               dropout_prob=0.5, num_classes=1)
+            elif self.network.lower() == "resnet10new":
+                self.backbone = generate_model(model_depth=10, n_input_channels=1, n_classes=1)
+            elif self.network.lower() == "resnet18new":
+                self.backbone = generate_model(model_depth=18, n_input_channels=1, n_classes=1)
+            elif self.network.lower() == "resnet50new":
+                self.backbone = generate_model(model_depth=50, n_input_channels=1, n_classes=1)
             else:
                 print('Not Implemented', self.network)
-
 
         if spatial_dims == 2:
-            if self.network.lower() == 'fnet':
-                self.backbone = Fnet2D()
-            elif self.network.lower() == 'seresnext50':
-                self.backbone = monai.networks.nets.SEResNext50(spatial_dims=2, in_channels=1, num_classes=1)
-            elif self.network.lower() == 'resnet18':
-                self.backbone = Resnet18_2d()
-            elif self.network.lower() == 'resnet50':
-                self.backbone = resnet50_2d()
-            elif self.network.lower() == 'densenet201':
-                self.backbone = monai.networks.nets.DenseNet201(spatial_dims=2, in_channels=1, out_channels=1)
-            elif self.network.lower() == 'convnext':
-                self.backbone = torchvision.models.convnext.convnext_small(
-                    weights=torchvision.models.get_model_weights("convnext_small"))
-                self.backbone.classifier[2] = nn.Linear(768, 1, bias=True)
-            if self.network.lower() == 'convnextbase':
-                self.backbone = torchvision.models.convnext.convnext_base(
-                    weights=torchvision.models.get_model_weights("convnext_base"))
-                self.backbone.classifier[2] = nn.Linear(1024, 1, bias=True)
-            else:
-                print('Not Implemented', self.network)
+            print('Not Implemented', self.network)
 
         if self.perform_swa:
             self.avg_model = deepcopy(self.backbone)
 
+    def _load_backbone_from_ckpt(
+            self,
+            ckpt_path: str,
+            prefixes=("backbone.", "model.backbone.", "encoder.", "model.encoder."),
+            strict: bool = False,
+    ):
+        """
+        Loads ONLY backbone weights from a Lightning checkpoint or a raw state_dict.
+
+        - Supports Lightning .ckpt with {"state_dict": ...}
+        - Filters keys by prefixes, then strips prefix so it matches self.backbone.*
+        """
+        if ckpt_path is None or str(ckpt_path).strip() == "":
+            print("[pretrained] No checkpoint path provided -> random init backbone.")
+            return
+
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Pretrained checkpoint not found: {ckpt_path}")
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state = ckpt.get("state_dict", ckpt)
+
+        # 1) if it's already a raw backbone state_dict (no prefixes), try direct load
+        #    (this will succeed if keys look like 'layer0.conv1.weight', etc.)
+        direct_ok = any(k.startswith("layer") or k.startswith("features") for k in state.keys())
+        if direct_ok:
+            missing, unexpected = self.backbone.load_state_dict(state, strict=strict)
+            print(
+                f"[pretrained] Loaded backbone directly from state_dict. missing={len(missing)} unexpected={len(unexpected)}")
+            return
+
+        # 2) otherwise filter by prefix
+        selected = {}
+        used_prefix = None
+        for pfx in prefixes:
+            tmp = {k[len(pfx):]: v for k, v in state.items() if k.startswith(pfx)}
+            if len(tmp) > 0:
+                selected = tmp
+                used_prefix = pfx
+                break
+
+        if len(selected) == 0:
+            # helpful debug: show a few keys
+            example_keys = list(state.keys())[:20]
+            raise RuntimeError(
+                "[pretrained] Could not find backbone weights in checkpoint.\n"
+                f"Tried prefixes: {prefixes}\n"
+                f"Example checkpoint keys: {example_keys}"
+            )
+
+        missing, unexpected = self.backbone.load_state_dict(selected, strict=strict)
+        print(
+            f"[pretrained] Loaded backbone from '{ckpt_path}' using prefix '{used_prefix}'. "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
 
     def change_model_state_to_inference(self, df, split, fold, label_name, fracture_timeline):
         self.inference_only = True
@@ -180,15 +277,17 @@ class BaseModel(pl.LightningModule):
         y_a, y_b = y, y[index]
         return mixed_x, y_a, y_b, lam
 
-    def xup_loss(self, pred, y_a, y_b, lam):
+    def mixup_loss(self, pred, y_a, y_b, lam):
         return lam * self.loss_fn(pred, y_a.float()) + (1 - lam) * self.loss_fn(pred, y_b.float())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # return self.classifier(self.backbone(x))
         return self.backbone(x)
 
     def configure_optimizers(self):
         # Fixed LR
         return self.optimizer(self.parameters(), lr=self.lr)
+        # return self.optimizer(self.parameters(), lr=self.lr, weight_decay=1e-3)
 
         # Cosine Annealing WarmRestarts Scheduler
         # optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
@@ -241,6 +340,7 @@ class BaseModel(pl.LightningModule):
         preds = self.sigmoid_layer(preds_linear_layer)
         return loss, {"predictions": preds.resize(1, len(preds)).to('cpu'),
                       "actuals": y_labels.resize(1, len(y_labels)).to('cpu'),
+                      "logits": preds_linear_layer.resize(1, len(preds_linear_layer)).to('cpu'),
                       "id": y_ids.resize(1, len(y_ids)).to('cpu')}
 
     def training_step(self, batch, batch_idx):
@@ -312,9 +412,9 @@ class BaseModel(pl.LightningModule):
 
         if dataset == 'test':
             # Record metric scores in an external excel file
-            # todo: read this external file through config
-            df = pd.read_excel(r"data/checkpoints/06082024_MrOS_model_results.xlsx", index_col=None)
-            data = self.save_folder.split('/')[3].split('_')
+            # f"20260329_{net}_3D_PrevalentFractures_{label_name}_605040_AdamWFixedLR{lr}_outerloop_{seed}"
+            df = pd.read_excel(self.metrics_file, index_col=None)
+            data = self.save_folder.split('/')[2].split('_')
             meta_data_length = len(df.columns) - 9  # 7 is number of metrics, 2 for split and epochs
             if len(data) > meta_data_length:
                 print('Inconsistent model name, cropping the ends')
@@ -322,10 +422,10 @@ class BaseModel(pl.LightningModule):
             elif len(data) < meta_data_length:
                 print('Missing variables in model name, appending blanks')
                 data.extend(['']*(meta_data_length-len(data)))
-            data.extend([self.save_folder.split('/')[4][-1], self.epoch_no])
+            data.extend([self.save_folder.split('/')[3][-1], self.epoch_no])
             data.extend([auroc.item(), auprc.item(), accuracy, precision, recall, f1, specificity])
             df.loc[len(df)] = data
-            df.to_excel(r"data/checkpoints/06082024_MrOS_model_results.xlsx", index=False)
+            df.to_excel(self.metrics_file, index=False)
 
     def compute_metrics_epoch(self, prediction, target, dataset):
         target = target.long()
@@ -432,10 +532,11 @@ class BaseModel(pl.LightningModule):
     def on_test_epoch_end(self) -> None:
 
         if self.inference_only:
-            prediction, target, id = self.test_metric_dict['predictions'].detach(), \
-                                     self.test_metric_dict['actuals'].detach(), \
-                                     self.test_metric_dict['id'].detach()
-            self.compute_inference(prediction, target, id)
+            prediction, target, logits, id = self.test_metric_dict['predictions'].detach(), \
+                                             self.test_metric_dict['actuals'].detach(), \
+                                             self.test_metric_dict['logits'].detach(), \
+                                             self.test_metric_dict['id'].detach()
+            self.compute_inference(prediction, target, logits, id)
             return
 
         prediction, target = self.test_metric_dict['predictions'].detach(), self.test_metric_dict['actuals'].detach()
@@ -446,12 +547,14 @@ class BaseModel(pl.LightningModule):
         self.test_metric_dict['predictions'] = torch.empty(1, 0)
         self.test_metric_dict['actuals'] = torch.empty(1, 0)
 
-    def compute_inference(self, prediction, target, id) -> None:
+    def compute_inference(self, prediction, target, logits, id) -> None:
         pred_binary = (prediction >= self.threshold).long().flatten().numpy()
         prediction = prediction.flatten().numpy()
+        logits = logits.flatten().numpy()
         target = target.flatten().numpy()
         id = id.flatten().numpy().astype(int)
         mapper_sigmoid = dict(zip(id, prediction))
+        mapper_logits = dict(zip(id, logits))
 
         if self.evaluate_ckpt:
             self.df[f"Sigmoid_Epoch{self.epoch_no}"] = self.df.ID.apply(lambda x: mapper_sigmoid[x])
@@ -461,252 +564,221 @@ class BaseModel(pl.LightningModule):
 
         plot_auroc_auprc(target, prediction, self.save_folder, self.split, self.suffix)
         mapper_binary = dict(zip(id, pred_binary))
-        self.df[f"Sigmoid_split{self.split}"] = self.df.ID.apply(lambda x: mapper_sigmoid[x])
-        self.df[f"Binary_split{self.split}"] = self.df.ID.apply(lambda x: mapper_binary[x])
+        # self.df[f"Sigmoid_split{self.split}"] = self.df.ID.apply(lambda x: mapper_sigmoid[x])  # MrOS
+        # self.df[f"Binary_split{self.split}"] = self.df.ID.apply(lambda x: mapper_binary[x])  # MrOS
+        self.df[f"Sigmoid"] = self.df.ID.apply(lambda x: mapper_sigmoid[x])  # VerSe
+        self.df[f"Binary"] = self.df.ID.apply(lambda x: mapper_binary[x])  # VerSe
+        self.df[f"Logits"] = self.df.ID.apply(lambda x: mapper_logits[x])  # VerSe
         self.df.to_csv(join(self.save_folder, f"{self.network}_{self.spatial_dims}D_sigmoid_results_fold_{self.fold}{self.suffix}.csv"),
                        index=False, sep=';')
         # box_strip_plot(self.df, self.split, self.label_name, self.save_folder)
-        plot_sigmoidVsFractureTime(self.df, self.split, self.save_folder, self.threshold, self.fracture_timeline, self.suffix)
+        # plot_sigmoidVsFractureTime(self.df, self.split, self.save_folder, self.threshold, self.fracture_timeline, self.suffix)  # MrOS
 
 
 class PLmodel(BaseModel):
     def __init__(self, class_ratio: float, spatial_dims: int, learning_rate: float, network: str = 'fnet',
-                 optimizer_name: str = "adamw", threshold: float = 0.5, threshold_tuning: str = False,
+                 optimizer_name: str = "adamw", threshold: float = 0.5, threshold_tuning = False,
                  save_folder: str = r"checkpoints/MrOS/dump", inference_only=False, df=None, split=0, fold=0,
-                 label_name='IF10SQ1', fracture_timeline=3653, label_suffix='', evaluate_ckpt=False, epoch=0):
+                 label_name='XMSQGE2', fracture_timeline=5478, label_suffix='', evaluate_ckpt=False,
+                 metrics_file=r"data/checkpoints/26112024_MrOS_model_results.xlsx", epoch=0):
 
         super(PLmodel, self).__init__(class_ratio, spatial_dims, learning_rate, network, optimizer_name,
                                       threshold, threshold_tuning, save_folder, inference_only, df, split, fold,
-                                      label_name, fracture_timeline, label_suffix, evaluate_ckpt, epoch)
+                                      label_name, fracture_timeline, label_suffix, evaluate_ckpt, metrics_file, epoch)
 
     def __str__(self):
         return 'PLmodel'
 
 
-def start_training(model_name, labels_file, image_folder, monitoring_metric, monitoring_mode, spatial_dims, input_size,
-                   label_name, split_nos, network, is_segmented, threshold_tuning, perform_inference, fracture_timeline,
-                   max_epoch, fold_no):
-    # Parameters
-    net_architecture = network
-    learning_rate = 5e-5
-    label = label_name
-    epochs = max_epoch
-    batch_size = 32
-    spatial_dims = spatial_dims
-    optimizer_name = 'adamw'
-    is_segmented = is_segmented
+def start_training(model_name, network, max_epoch, lr, pretrained):
 
-    project_name = "MrOS_Prognostic"
+    net_architecture = network
+    learning_rate = lr
+    epochs = max_epoch
+    spatial_dims = 3
+    binary_label = '0vs23'
+    threshold_tuning = False
+    optimizer_name = 'adamw'
+    monitoring_metric = 'validation_loss'
+    monitoring_mode = 'min'
+
+    project_name = WANDB_PROJECT_NAME
     group_name = model_name
-    wandb.login(key="64339572cb325d13488524ac730cc32f507bd8ad")
+    wandb.login(key=WANDB_KEY)
     wandb_logging_config = {
         'net_architecture': net_architecture,
-        'spatial_dims': spatial_dims,
         'learning_rate': learning_rate,
         'optimizer': optimizer_name,
-        'label': label,
         'epochs': epochs,
-        'is_segmented': is_segmented,
-        'image_dir': image_folder,
-        'labels_filename': labels_file,
         'task_name': project_name,
-        'threshold_tuning': threshold_tuning,
         'monitoring_metric': monitoring_metric,
         'monitoring_mode': monitoring_mode,
     }
 
-    checkpoint_folder_main = rf"data/checkpoints/MrOS/{model_name}"
+    config_file = DataModuleConfig(num_cpus=2, simlr=False)
+    dataset_loader = DataModule(config_file)
+    dataset_loader.prepare_data()
+    class_ratio = dataset_loader.get_class_ratio()
+
+    checkpoint_folder_main = rf"{config_file.save_folder}/{model_name}"
     os.makedirs(checkpoint_folder_main, exist_ok=True)
     with open(join(checkpoint_folder_main, 'training_info.json'), "w") as outfile:
         json.dump(wandb_logging_config, outfile)
-
-    for split_no in split_nos:
-        split_name = f"Split{split_no}"
-        checkpoint_folder = rf"data/checkpoints/MrOS/{model_name}/{split_name}"
-        os.makedirs(checkpoint_folder, exist_ok=True)
-        checkpoint_filename = group_name + '_' + split_name + '_top_ckpt_at_{epoch}_with_{validation_auroc:.3f}'
-        experiment_name = f"Fold{fold_no}"
-
-        wandb.init(project=project_name, name=experiment_name, config=wandb_logging_config, group=group_name)
-        best_checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_folder,
-                                                   filename=checkpoint_filename,
-                                                   save_top_k=1,
-                                                   monitor=monitoring_metric,
-                                                   mode=monitoring_mode)
-
-        config_file = Config(num_cpus=2, simlr=False)
-        config_file.datamodule.test_as_validation = True
-        config_file.datamodule.labels_file = labels_file
-        config_file.datamodule.img_dir = image_folder
-        config_file.datamodule.split_name = split_name
-        config_file.datamodule.label = label_name
-        config_file.datamodule.input_size = input_size
-        config_file.datamodule.batch_size = batch_size
-        config_file.datamodule.input_dimension = spatial_dims
-        sample_dataset_loader = DataModule(config_file)
-        sample_dataset_loader.prepare_data()
-        class_ratio = sample_dataset_loader.get_class_ratio()
-
-        model = PLmodel(class_ratio=class_ratio, spatial_dims=spatial_dims, learning_rate=learning_rate,
-                        network=net_architecture, optimizer_name=optimizer_name, fold=fold_no,
-                        threshold_tuning=threshold_tuning, save_folder=checkpoint_folder)
-        wandb_logger = WandbLogger(project=project_name, name=experiment_name)
-        trainer = pl.Trainer(devices=1, max_epochs=epochs, logger=wandb_logger,
-                             # limit_train_batches=0.66,
-                             callbacks=[
-                                 best_checkpoint_callback,
-                                 EarlyStopping(monitor=monitoring_metric, min_delta=0.01, patience=5, verbose=False,
+    
+    checkpoint_folder = rf"{config_file.save_folder}/{model_name}/Label{binary_label}"
+    os.makedirs(checkpoint_folder, exist_ok=True)
+    checkpoint_filename = group_name + '_' + binary_label + '_top_ckpt_at_{epoch}_with_{validation_auroc:.3f}'
+    experiment_name = binary_label
+    
+    wandb.init(project=project_name, name=experiment_name, config=wandb_logging_config, group=group_name)
+    
+    best_checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_folder,
+                                               filename=checkpoint_filename,
+                                               save_top_k=1,
+                                               monitor=monitoring_metric,
                                                mode=monitoring_mode)
-                                 ]
-                             )
-        trainer.fit(model=model, datamodule=sample_dataset_loader)
-        # trainer.save_checkpoint(join(checkpoint_folder,group_name+'_'+split_name+f'Model_trained_for_epochs_{epochs}.ckpt'))
 
-        best_model_path = glob.glob(join(checkpoint_folder, '*.ckpt'))[0]
-        match = re.search(r"epoch=(\d+)", best_model_path)
-        if match:
-            epoch_number = match.group(1)
-        else:
-            epoch_number = 0
-        save_folder = f"/data/checkpoints/Censored_sub_evaluation"
-        model = PLmodel.load_from_checkpoint(best_model_path, class_ratio=class_ratio, spatial_dims=spatial_dims,
-                                             network=net_architecture, learning_rate=learning_rate, threshold=0.5,
-                                             fold=fold_no, save_folder=checkpoint_folder, split=split_no, epoch=epoch_number)
-        trainer.test(model=model, datamodule=sample_dataset_loader)
+    model = PLmodel(class_ratio=class_ratio, spatial_dims=spatial_dims, learning_rate=learning_rate,
+                    network=net_architecture, optimizer_name=optimizer_name, fold=binary_label,
+                    threshold_tuning=threshold_tuning, save_folder=checkpoint_folder,
+                    metrics_file=config_file.metrics_file)
+    wandb_logger = WandbLogger(project=project_name, name=experiment_name)
+    trainer = pl.Trainer(devices=1, max_epochs=epochs, logger=wandb_logger,
+                         callbacks=[
+                             best_checkpoint_callback,
+                             EarlyStopping(monitor=monitoring_metric, min_delta = 0.005, patience=20, verbose=False, mode=monitoring_mode)
+                             ]
+                         )
+    trainer.fit(model=model, datamodule=dataset_loader)
 
-        # Incase of model training with 4-fold cv, the data loader is re-initialized with test data as is
-        config_file = Config(num_cpus=2)
-        config_file.datamodule.labels_file = labels_file
-        config_file.datamodule.img_dir = image_folder
-        config_file.datamodule.split_name = split_name
-        config_file.datamodule.label = label_name
-        config_file.datamodule.input_size = input_size
-        config_file.datamodule.batch_size = batch_size
-        config_file.datamodule.input_dimension = spatial_dims
-        sample_dataset_loader = DataModule(config_file)
-        sample_dataset_loader.test_as_validation = False
-        sample_dataset_loader.prepare_data()
-        trainer.test(model=model, datamodule=sample_dataset_loader)
+    # For explicitly saving the checkpoint at the end of full-training
+    # trainer.save_checkpoint(join(checkpoint_folder,group_name+'_'+split_name+f'Model_trained_for_epochs_{epochs}.ckpt'))
 
-        if perform_inference:
-            df = pd.read_csv(labels_file, delimiter=';', index_col=None)
-            # best_model.change_model_state_to_inference(df, split_no, label_name, fracture_timeline)
-            model.change_model_state_to_inference(df, split_no, fold_no, label_name, fracture_timeline)
-            config_file.datamodule.Inference_only = True
-            sample_dataset_loader = DataModule(config_file)
-            sample_dataset_loader.prepare_data()
-            # trainer.test(model=best_model, datamodule=sample_dataset_loader)
-            trainer.test(model=model, datamodule=sample_dataset_loader)
+    best_model_path = glob.glob(join(checkpoint_folder, '*.ckpt'))[0]
+    match = re.search(r"epoch=(\d+)", best_model_path)
+    if match:
+        epoch_number = match.group(1)
+    else:
+        epoch_number = 0
 
-        wandb.finish()
+    model = PLmodel.load_from_checkpoint(best_model_path, class_ratio=class_ratio, spatial_dims=spatial_dims,
+                                         network=net_architecture, learning_rate=learning_rate, threshold=0.5, label_name=label,
+                                         fold=binary_label, save_folder=checkpoint_folder, split=binary_label, epoch=epoch_number,
+                                         metrics_file=config_file.metrics_file)
+    trainer.test(model=model, datamodule=dataset_loader)
+    wandb.finish()
 
 
 def test_network():
-    image_batch = torch.tensor(np.random.rand(16, 3, 50, 40), dtype=torch.float32)
-    label = torch.randint(0, 1, (16,))
+    image_batch = torch.tensor(np.random.rand(32, 1, 60, 50, 40), dtype=torch.float32)
+    label = torch.randint(0, 1, (32,))
 
-    # backbone = SEResNext50(spatial_dims=2, in_channels=1, num_classes=1)
-
-    weights_enum = torchvision.models.get_model_weights("convnext_base")
-    backbone = torchvision.models.convnext.convnext_base(weights=weights_enum)
-    # print(backbone)
-    backbone.classifier[2] = nn.Linear(1024, 1)  # for convnext base
-    # backbone.classifier[2] = nn.Linear(1536, 1)  # for convnext large
+    backbone = CustomSEResNet50()
     out = backbone(image_batch)
-    #
     count_and_print_num_of_parameters(backbone)
     print("Output Shape: ", out.shape)
     print("Labels Shape: ", label.shape)
 
 
-def preprocess_and_inference(save_folder, csv_filename, image_dir, split_no, fold_no, spatial_dims, net,
+def preprocess_and_inference(model_name, csv_filename, image_dir, fold_no, spatial_dims, net,
                              label_name, fracture_time, train_as_test=False, validation_as_test=False):
+    split_no=4
     df = pd.read_csv(csv_filename, delimiter=';', index_col=None)
-    split_name = f'Split{split_no}'
-    config_file = Config(num_cpus=2, simlr=False)
-    config_file.datamodule.labels_file = csv_filename
-    config_file.datamodule.img_dir = image_dir
-    config_file.datamodule.split_name = split_name
-    config_file.datamodule.label = label_name
-    config_file.datamodule.Inference_only = True
-    config_file.datamodule.input_dimension = spatial_dims
-    sample_dataset_loader = DataModuleMrOS(config_file)
-    sample_dataset_loader.prepare_data()
-    class_weight = sample_dataset_loader.get_class_ratio()
+    split_name = "Dataset"   # 'Split4' for MrOS, 'Dataset' for VerSe
+    config_file = DataModuleConfig(num_cpus=2, simlr=False)
+    config_file.labels_file = csv_filename
+    config_file.img_dir = image_dir
+    config_file.split_name = "Dataset"   # 'Split4' for MrOS, 'Dataset' for VerSe
+    config_file.label = label_name
+    config_file.Inference_only = True
+    config_file.input_dimension = spatial_dims
+    dataset_loader = DataModule(config_file)
+    dataset_loader.prepare_data()
+    class_weight = dataset_loader.get_class_ratio()
+
 
     if train_as_test and validation_as_test:
         print("Cannot perform inference on train and validation set at once")
         return
     if train_as_test:
-        sample_dataset_loader.train_as_test = True
+        dataset_loader.train_as_test = True
         df[split_name] = df[split_name].replace({'Training': 'Testing', 'Testing': 'Training'})
         save_label_suffix = '_Train'
     elif validation_as_test:
-        sample_dataset_loader.validation_as_test = True
+        dataset_loader.validation_as_test = True
         df[split_name] = df[split_name].replace({'Validation': 'Testing', 'Testing': 'Validation'})
         save_label_suffix = '_Validation'
     else:
         save_label_suffix = '_Test'
-
-    cktp_files = [file for file in os.listdir(join(save_folder, split_name)) if file.endswith(".ckpt")]
+    save_folder = join("data/checkpoints/VerSe", model_name, f'Label{label_name}')
+    cktp_files = [file for file in os.listdir(save_folder) if file.endswith(".ckpt")]
     # cktp_files = [file for file in os.listdir(join(save_folder, split_name)) if 'validation_auroc' in file and file.endswith(".ckpt")]
     if len(cktp_files) == 1:
-        model_path = os.path.join(save_folder, split_name, cktp_files[0])
+        model_path = os.path.join(save_folder, cktp_files[0])
     else:
         print(f"Error: There is not exactly one .ckpt file in the folder, using the {cktp_files[0]} file")
-        model_path = os.path.join(save_folder, split_name, 'epoch_15', cktp_files[0])
-    save_folder = f"/data/checkpoints/saved_inferences"
+        model_path = os.path.join(save_folder, cktp_files[0])
+    # save_folder = os.path.join(save_folder, fold_no)
     model = PLmodel.load_from_checkpoint(model_path, class_ratio=class_weight, spatial_dims=spatial_dims,
                                          learning_rate=1e-5, network=net,
-                                         save_folder=save_folder, inference_only=True, df=df, split=split_no, fold=fold_no,
+                                         save_folder=save_folder, inference_only=True, df=df, split='Dataset', fold='Dataset',
                                          label_name=label_name, fracture_timeline=fracture_time,
                                          label_suffix=save_label_suffix)
     trainer = pl.Trainer(devices=1, max_epochs=50)
-    trainer.test(model=model, datamodule=sample_dataset_loader)
+    trainer.test(model=model, datamodule=dataset_loader)
 
 
 def inspect_data_loader(image_folder, labels_file, split_name, label_name):
 
-    config_file = Config(num_cpus=2, simlr=False)
-    config_file.datamodule.input_dimension = 2
-    config_file.datamodule.labels_file = labels_file
-    config_file.datamodule.img_dir = image_folder
-    config_file.datamodule.split_name = split_name
-    config_file.datamodule.label = label_name
-    sample_dataset_loader = DataModuleMrOS(config_file)
-    sample_dataset_loader.prepare_data()
+    config_file = DataModuleConfig(num_cpus=2, simlr=False)
+    config_file.input_dimension = 2
+    config_file.labels_file = labels_file
+    config_file.img_dir = image_folder
+    config_file.split_name = split_name
+    config_file.label = label_name
+    dataset_loader = DataModule(config_file)
+    dataset_loader.prepare_data()
 
-    test_loader = iter(sample_dataset_loader.train_dataloader())
+    test_loader = iter(dataset_loader.train_dataloader())
 
     for i in range(1):
         images,  labels = next(test_loader)
-        fig, ax = plt.subplots(1, len(images), figsize=(20, 5))
+        # fig, ax = plt.subplots(1, len(images), figsize=(20, 5))
         for idx, im in enumerate(images):
-            ax[idx].imshow(im.numpy()[0].squeeze(), cmap='gray')
-            ax[idx].grid(False)
-            ax[idx].set_xticks([])
-            ax[idx].set_yticks([])
-        plt.axis('off')
-        plt.grid(b=None)
-        plt.show()
+            print(im.shape)
+        #     ax[idx].imshow(im.numpy()[0].squeeze(), cmap='gray')
+        #     ax[idx].grid(False)
+        #     ax[idx].set_xticks([])
+        #     ax[idx].set_yticks([])
+        # plt.axis('off')
+        # plt.grid(b=None)
+        # plt.show()
+
+    # im, label = next(test_loader)
+    # print(im.shape)
+    # print(label.shape)
 
 
-def main():
-    version = 1
-    label = 'FAANYSPN'  # Name of the column in the MrOS database file "Fracture analysis 2023", indicates any fracture
-    input_size = 47  # Size of input image
-    network = 'convnextbase'  # Alias for the network architecture
-    spatial_dims = 2  # Whether to use 2D or 3D
-    image_folder_name_3d = r"MrOs_dataset/patches_arbitary_sized"  # Folder containing nii files of 3D vertebral patches
-    max_epoch = 50
-    split_list = [4]
-
-    for fold in [0, 1, 2, 3]:  # 4 splits (subsets) of the dataset, each used as test set once
-        data_file = rf"MrOs_dataset/MrOS_labels_v8/MrOs_Label_2024_FAANYSPN_SQ1_10years_splitv8_testsplit{fold}.csv"
-        model_name = f"06082024_{network}_{spatial_dims}D_IF10SQ1_{label}_{str(input_size)*3}_NoSegBS32_AdamwFixedLR5e6_outerloop_{fold}_v{version}"
-        start_training(model_name, data_file, image_folder_name_3d, 'validation_loss', 'min', spatial_dims, input_size,
-                       f'IF10SQ1', split_list, network, False, False, False, 3653, max_epoch, fold)
+def main_prog(seed):
+    set_seed(seed)
+    epoch = 50
+    pretrained = True
+    for lr in [1e-3]:  #to test for different Learning rates
+        for net in ["seresnetbyol100"]:  #to test different models
+            for label_name in ["0vs23"]:  #to test different labels : 0vs23, 01vs23, 0vs123
+                model_name = f"20260329_{net}_3D_PrevalentFractures_{label_name}_605040_AdamWFixedLR{lr}_outerloop_{seed}"
+                start_training(model_name, net, epoch, lr, pretrained)
 
 
 if __name__ == "__main__":
-    main()
+    test_network()
+    # main_prog(478546)
+    # image_folder = r"verse19/full_dataset_patches"
+    # labels_file = r"verse19/verse19_0vs23_splitted.csv"
+    # split_name = 'Dataset'
+    # label_name = "0vs23"
+    # inspect_data_loader(image_folder, labels_file, split_name, label_name)
+    #
+    # inspect_data_loader(image_folder=r"MrOs_dataset/patches_arbitary_sized",
+    #                     labels_file=rf"MrOs_dataset/MrOS_labels_v8/MrOs_Label_2024_FAANYSPN_SQ1_10years_splitv8_testsplit0.csv",
+    #                     split_name='Split4', label_name='IF10SQ1')

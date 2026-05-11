@@ -19,11 +19,11 @@ from monai.transforms import RandRotate, RandZoom, RandShiftIntensity, RandGauss
 import numpy as np
 
 
-class DataModuleMrOS(pl.LightningDataModule, ABC):
+class DataModule(pl.LightningDataModule, ABC):
 
     def __init__(self, config):
         super().__init__()
-        self._config = config.datamodule
+        self._config = config
         self._img_dir: Final[Path] = PROJECT_ROOT_DIR.joinpath(self._config.img_dir)
         self._labels_csv: Final[Path] = PROJECT_ROOT_DIR.joinpath(self._config.labels_file)
         self._train_set = None
@@ -33,37 +33,10 @@ class DataModuleMrOS(pl.LightningDataModule, ABC):
         self._censoring_label = self._config.censor_label  # regression
         self.ID_column_name = self._config.ID_label
         self.inference_only = self._config.Inference_only
-        self.train_as_test = False
-        self.validation_as_test = False
-        self.test_as_validation = config.datamodule.test_as_validation
 
-    def swap_dataset_labels(self, df, label_a, label_b) -> DataFrame:
-        df[self._config.split_name] = df[self._config.split_name].replace({label_a: label_b, label_b: label_a})
-        return df
 
     def _load_labels_df(self) -> DataFrame:
         df = pd.read_csv(self._labels_csv, sep=';')
-        # df = df[df[self._label_column_name] == df[self._label_column_name]]  # remove NA values
-        if self.train_as_test:
-            self.swap_dataset_labels(df, 'Training', 'Testing')
-        elif self.validation_as_test:
-            self.swap_dataset_labels(df, 'Validation', 'Testing')
-        elif self.test_as_validation:
-            self.swap_dataset_labels(df, 'Testing', 'Validation')
-
-        # For plotting only MIUA paper sample subjects
-        # df = df[df.SubjectID.isin(['BI0370', 'MN1964', 'BI0083', 'PO6593', 'PA3225', 'PI4922', 'PO6588', 'SD8583', 'SD8059',
-        #                            'PO7294', 'MN2094', 'MN1828', 'PO6588', 'BI0435', 'PO6588', 'SD8024', 'PA3232'])]
-
-        # For plotting only BMI
-        # df = df[(df.BMI>35) & (df.BMI<39)]
-        # for i in range(1, 4):
-        #     df[f'Split{i}'] = 'Testing'
-        # df.sort_values(['SubjectID', 'Vertebra', 'AGE'], inplace=True)
-        # df = df[df[self._config.label]==1]  # for plotting sagittal views
-
-        # df[self._censoring_label] = df[self._censoring_label].astype(int)  # regression
-        # df[self._label_column_name] = df[self._label_column_name].astype(int)
         return df
 
     def _build_dataset_from_subjectlist_and_apply_transformations(self, train_subjects, val_subjects, test_subjects):
@@ -165,15 +138,16 @@ class ApplyTransformations(object):
         self.smooth_range = (self.max_smooth / self.max_magnitude) * self.magnitude
         self.shift_range = (self.max_shift / self.max_magnitude) * self.magnitude
 
+        resize = tio.Resize((47, 47, 47))
+        if self.input_size == 605040:
+            resize = tio.Resize((60, 50, 40))
+
         self.preprocessing_transforms = Compose([
-            # tio.Resample((47, 47, 47)),
-            # tio.CropOrPad((self.input_size, self.input_size, self.input_size)),
+            resize,
             tio.Clamp(out_min=-100, out_max=1000),
             tio.RescaleIntensity(in_min_max=(-100, 1000), out_min_max=(0, 1)),
-            tio.Resize((self.input_size, self.input_size, self.input_size)),
         ])
 
-        # self.resize_2d = torchvision.transforms.Resize((47, 47))
 
     def __call__(self, x):
         rotation_x = RandRotate(range_x=self.rotation_range, padding_mode='zeros', prob=1)
@@ -195,7 +169,7 @@ class ApplyTransformations(object):
         # all_transforms = [rotation_x, rotation_y, rotation_z, translate_x, translate_y, translate_z, zoom, smooth]
         # sampled_transforms = random.sample(all_transforms, self.num_sequential_transforms)
 
-        sampled_transforms = random.sample([flip, rotation_x, rotation_y, rotation_z,
+        sampled_transforms = random.sample([flip, rotation_x, rotation_y, rotation_z, shift_intensity,
                                             translate_x, translate_y, translate_z, zoom, smooth, noise],
                                            self._config.num_sequential_transforms)
 
@@ -213,7 +187,6 @@ class ApplyTransformations(object):
         # when using 2d image with 1 channel
         # x = np.expand_dims(x, 0)
         # x = np.broadcast_to(x, (3, x.shape[1], x.shape[2]))  # monai transforms need chanel first 2d
-        # print(x.shape)
         x = self.preprocessing_transforms(x)  # always apply preprocessing e.g. clamp and rescale for 3d
 
         if self.input_dimension == 2:
